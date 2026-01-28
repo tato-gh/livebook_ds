@@ -1,0 +1,617 @@
+# Titanic Advanced Feature Engineering
+
+```elixir
+Mix.install([
+  {:explorer, "~> 0.11.1"},
+  {:scholar, "~> 0.3"},
+  {:nx, "~> 0.9"},
+  {:kino, "~> 0.18"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:exgboost, "~> 0.5"}
+])
+```
+
+## はじめに
+
+本内容は、下記のKaggleチュートリアルを参考にしながら、Elixir/Livebookで構成したものです。
+
+This article is based on [Titanic Advanced Feature Engineering Tutorial](https://www.kaggle.com/code/gunesevitan/titanic-advanced-feature-engineering-tutorial) under Apache 2.0 License.
+
+ただし、同じ内容ではありません。
+
+* Elixirだとこういう感じで記述できる、という実感を主目的にしています。
+  * 掲載コードは、過去に試していたもの+AIによる生成をベースにしているため、実は`scholar`などのライブラリに便利な関数があり、より簡便にできる可能性があります。
+* グラフ描画まわりも内容が散らかるので`DataFrame.print`で済ませています。
+
+試す場合にはデータを[Kaggle Titanic](https://www.kaggle.com/competitions/titanic)から取得してください。
+
+```elixir
+alias Explorer.DataFrame, as: DF
+alias Explorer.Series, as: S
+require Explorer.DataFrame
+```
+
+## データの読み込み
+
+```elixir
+parse_csv = fn kino_input_file ->
+  kino_input_file
+  |> Kino.Input.read()
+  |> Map.get(:file_ref)
+  |> Kino.Input.file_path()
+  |> DF.from_csv!()
+end
+```
+
+```elixir
+train_data_input = Kino.Input.file("train data")
+```
+
+```elixir
+test_data_input = Kino.Input.file("test data")
+```
+
+```elixir
+df_train = parse_csv.(train_data_input)
+df_test = parse_csv.(test_data_input)
+
+IO.puts("Training set: #{DF.n_rows(df_train)} rows, #{DF.n_columns(df_train)} columns")
+IO.puts("Test set: #{DF.n_rows(df_test)} rows, #{DF.n_columns(df_test)} columns")
+```
+
+```elixir
+# Concatenate train and test for unified preprocessing
+# Add a marker column to split later
+# データ整形のため全データ結合版を生成
+df_train_marked = DF.mutate(df_train, is_train: 1)
+
+df_test_marked =
+  df_test
+  |> DF.mutate(Survived: -1)  # Placeholder for test set
+  |> DF.mutate(is_train: 0)
+
+df_all = DF.concat_rows([df_train_marked, df_test_marked])
+IO.puts("Combined dataset: #{DF.n_rows(df_all)} rows")
+```
+
+```elixir
+# データ概要表示
+# 特に欠損値のあるカラムの確認など
+described_raw_data = DF.describe(df_all)
+Kino.DataTable.new(described_raw_data)
+```
+
+```elixir
+# 訓練データ内の生存者程度の確認
+survived_counts =
+  df_train
+  |> DF.group_by("Survived")
+  |> DF.summarise(count: count(col("Survived")))
+
+IO.puts("Survival distribution:")
+DF.print(survived_counts)
+```
+
+## 欠損値処理
+
+```elixir
+# 欠損値をもつカラムとその個数を表示
+# `described_raw_data`からでも可
+defmodule MissingValues do
+  def count(df) do
+    df
+    |> DF.names()
+    |> Enum.map(fn col ->
+      series = df[col]
+      nil_count = S.nil_count(series)
+      total = S.size(series)
+      {col, nil_count, Float.round(nil_count / total * 100, 2)}
+    end)
+    |> Enum.filter(fn {_, count, _} -> count > 0 end)
+    |> Enum.sort_by(fn {_, count, _} -> -count end)
+  end
+
+  def display(df, name) do
+    IO.puts("\n#{name} - Missing Values:")
+    count(df)
+    |> Enum.each(fn {col, count, pct} ->
+      IO.puts("  #{col}: #{count} (#{pct}%)")
+    end)
+  end
+end
+
+MissingValues.display(df_train, "Training Set")
+MissingValues.display(df_test, "Test Set")
+```
+
+```elixir
+# 1. Age
+# Ageと相関のあるデータに注意して欠損を埋める。
+# AgeはSex/Pclassと相関が高かったため、それらを参照したうえで中央値によって埋める。
+
+defmodule AgeFiller do
+  def fill_missing_age(df) do
+    # Calculate median age for each Sex + Pclass group
+    medians =
+      df
+      |> DF.filter(not is_nil(col("Age")))
+      |> DF.group_by(["Sex", "Pclass"])
+      |> DF.summarise(median_age: median(col("Age")))
+      |> DF.to_rows()
+      |> Enum.map(fn row ->
+        {{row["Sex"], row["Pclass"]}, row["median_age"]}
+      end)
+      |> Map.new()
+    
+    IO.puts("Age medians by Sex and Pclass:")
+    Enum.each(medians, fn {{sex, pclass}, median} ->
+      IO.puts("  #{sex}, Pclass #{pclass}: #{median}")
+    end)
+
+    # Fill missing ages
+    # FIXME: `fill_missing`あたりで効率の良いやり方... 
+    df
+    |> DF.to_rows()
+    |> Enum.map(fn row ->
+      if is_nil(row["Age"]) do
+        key = {row["Sex"], row["Pclass"]}
+        Map.put(row, "Age", Map.get(medians, key, 28.0))
+      else
+        row
+      end
+      end)
+    |> DF.new()
+  end
+end
+
+df_all = AgeFiller.fill_missing_age(df_all)
+IO.puts("\nAge missing after fill: #{S.nil_count(df_all["Age"])}")
+```
+
+```elixir
+# 2. Embarked
+# 欠損値は2件。元記事によるとTicketが同じ2件で、そのうちの1名が S (Southampton) から乗ったという情報がググれたそう。
+# よって、Sで埋める
+df_all = DF.mutate(df_all,
+  Embarked: if(is_nil(col("Embarked")), do: "S", else: col("Embarked"))
+)
+IO.puts("Embarked missing after fill: #{S.nil_count(df_all["Embarked"])}")
+```
+
+```elixir
+# 3. Fare
+# Ageと同様に関連している属性に配慮して埋める。
+# ここでは該当者が1件 Pclass=3, SibSp=0, Parch=0 なのでピンポイントで埋めてしまう
+med_fare =
+  df_all
+  |> DF.filter(col("Pclass") == 3 and col("SibSp") == 0 and col("Parch") == 0 and not is_nil(col("Fare")))
+  |> DF.pull("Fare")
+  |> S.median()
+
+IO.puts("Median fare for Pclass 3 alone passengers: #{med_fare}")
+
+df_all = DF.mutate(df_all,
+  Fare: if(is_nil(col("Fare")), do: ^med_fare, else: col("Fare"))
+)
+IO.puts("Fare missing after fill: #{S.nil_count(df_all["Fare"])}")
+```
+
+```elixir
+# 4. Cabin
+# 欠損値が多いうえにドメイン知識が必要な属性 元記事を参照
+# 欠損値込みで、Deckという属性に全体を整理する。
+defmodule DeckExtractor do
+  def extract_deck(cabin) when is_nil(cabin), do: "M"
+  def extract_deck(cabin) do
+    deck = String.first(cabin)
+    # T deck passenger grouped with A
+    if deck == "T", do: "A", else: deck
+  end
+
+  def group_deck(deck) do
+    case deck do
+      d when d in ["A", "B", "C"] -> "ABC"
+      d when d in ["D", "E"] -> "DE"
+      d when d in ["F", "G"] -> "FG"
+      "M" -> "M"
+    end
+  end
+end
+
+# Extract and group decks
+deck_series =
+  df_all["Cabin"]
+  |> S.transform(&DeckExtractor.extract_deck/1)
+  |> S.transform(&DeckExtractor.group_deck/1)
+
+df_all = DF.put(df_all, "Deck", deck_series)
+
+# Check deck distribution
+df_all
+|> DF.group_by("Deck")
+|> DF.summarise(count: count(col("Deck")))
+|> DF.print()
+```
+
+## 特徴量エンジニアリング
+
+```elixir
+# 1. 家族構成人数
+# Survived傾向に違いがあるので新規に整理して追加
+df_all = DF.mutate(df_all, Family_Size: col("SibSp") + col("Parch") + 1)
+
+# Group family sizes
+defmodule FamilySizeGrouper do
+  def group(size) do
+    case size do
+      1 -> "Alone"
+      v when v in [2, 3, 4] -> "Small"
+      v when v in [5, 6] -> "Medium"
+      _ -> "Large"
+    end
+  end
+end
+
+family_size_grouped =
+  df_all["Family_Size"]
+  |> S.transform(&FamilySizeGrouper.group/1)
+
+df_all = DF.put(df_all, "Family_Size_Grouped", family_size_grouped)
+
+# Check distribution
+df_all
+|> DF.group_by("Family_Size_Grouped")
+|> DF.summarise(count: count(col("Family_Size_Grouped")))
+|> DF.print()
+```
+
+```elixir
+# 2. 同一チケット所有数
+# 家族構成数と似ているがこちらもSurvived傾向に違いがあるので追加
+ticket_counts =
+  df_all
+  |> DF.group_by("Ticket")
+  |> DF.summarise(Ticket_Frequency: count(col("Ticket")))
+
+df_all = DF.join(df_all, ticket_counts, on: "Ticket")
+
+IO.puts("Ticket frequency range: #{S.min(df_all["Ticket_Frequency"])} - #{S.max(df_all["Ticket_Frequency"])}")
+```
+
+```elixir
+# 3. 敬称
+# 性別や結婚有無などの情報を生成
+defmodule TitleExtractor do
+  def extract(name) do
+    # Extract title between ", " and "."
+    Regex.run(~r/, ([A-Za-z ]+)\./, name)
+    |> normalize_title()
+  end
+  
+  defp normalize_title(nil), do: "Other"
+
+  defp normalize_title([_, title]) do
+    title
+    |> String.trim()
+    |> case do
+      v when v in ["Miss", "Mrs", "Ms", "Mlle", "Lady", "Mme", "the Countess", "Dona"] ->
+        "Miss/Mrs/Ms"
+      v when v in ["Dr", "Col", "Major", "Jonkheer", "Capt", "Sir", "Don", "Rev"] ->
+        "Dr/Military/Noble/Clergy"
+      v when v in ["Mrs", "Master", "Mr"] ->
+        v
+    end
+  end
+end
+
+title_series =
+  df_all["Name"]
+  |> S.transform(&TitleExtractor.extract/1)
+
+df_all = DF.put(df_all, "Title", title_series)
+
+# Check Is_Married (was Mrs before normalization)
+is_married_series =
+  df_all["Name"]
+  |> S.transform(fn name ->
+    case Regex.run(~r/, ([A-Za-z]+)\./, name) do
+      [_, "Mrs"] -> 1
+      _ -> 0
+    end
+  end)
+
+df_all = DF.put(df_all, "Is_Married", is_married_series)
+
+# Title distribution
+df_all
+|> DF.group_by("Title")
+|> DF.summarise(count: count(col("Title")))
+|> DF.print(limit: :infinity)
+```
+
+```elixir
+# 4. 家族
+# train内から同じ家族と思われる集団の生存率を作るために属性を生成
+defmodule SurnameExtractor do
+  def extract(name) do
+    name
+    |> String.split(",")
+    |> List.first()
+    |> String.replace(~r/[^\w\s]/, "")
+    |> String.trim()
+  end
+end
+
+family_series =
+  df_all["Name"]
+  |> S.transform(&SurnameExtractor.extract/1)
+
+df_all = DF.put(df_all, "Family", family_series)
+
+df_all
+|> DF.group_by("Family")
+|> DF.summarise(count: count(col("Family")))
+|> DF.filter(col("count") > 1)
+|> DF.print()
+```
+
+```elixir
+# 5. 生存率（ターゲットエンコーディング）
+# 家族とチケット、でのグループにおける生存率をtrainから割り出して特徴量とする。
+# // CVするなら分けたあとにする方が望ましいだろうか？
+
+defmodule TargetEncoder do
+  @doc """
+  Calculate survival rates for families/tickets that appear in both train and test sets
+  """
+  def encode_survival_rate(df_all, group_col) do
+    # Split back to train/test
+    df_train = DF.filter(df_all, is_train == 1)
+    df_test = DF.filter(df_all, is_train == 0)
+
+    # Find groups that exist in both sets
+    train_groups = df_train[group_col] |> S.distinct() |> S.to_list() |> MapSet.new()
+    test_groups = df_test[group_col] |> S.distinct() |> S.to_list() |> MapSet.new()
+    common_groups = MapSet.intersection(train_groups, test_groups)
+
+    # Calculate survival rates for common groups with size > 1
+    survival_rates =
+      df_train
+      |> DF.filter(col(^group_col) in ^MapSet.to_list(common_groups))
+      |> DF.group_by(group_col)
+      |> DF.summarise(
+        survival_rate: mean(col("Survived")),
+        group_size: count(col("Survived"))
+      )
+      |> DF.filter(group_size > 1)
+      |> DF.to_rows()
+      |> Enum.map(fn row -> {row[group_col], row["survival_rate"]} end)
+      |> Map.new()
+
+    # Mean survival rate for fallback
+    mean_rate = S.mean(df_train["Survived"])
+
+    # Apply to all data
+    rate_series =
+      df_all[group_col]
+      |> S.transform(fn group ->
+        Map.get(survival_rates, group, mean_rate)
+      end)
+
+    # NA indicator (1 if rate was available, 0 otherwise)
+    na_series =
+      df_all[group_col]
+      |> S.transform(fn group ->
+        if Map.has_key?(survival_rates, group), do: 1, else: 0
+      end)
+
+    {rate_series, na_series}
+  end
+end
+
+# Calculate family survival rate
+{family_rate, family_rate_na} =
+  TargetEncoder.encode_survival_rate(df_all, "Family")
+
+df_all = df_all
+  |> DF.put("Family_Survival_Rate", family_rate)
+  |> DF.put("Family_Survival_Rate_NA", family_rate_na)
+
+# Calculate ticket survival rate
+{ticket_rate, ticket_rate_na} =
+  TargetEncoder.encode_survival_rate(df_all, "Ticket")
+
+df_all = df_all
+  |> DF.put("Ticket_Survival_Rate", ticket_rate)
+  |> DF.put("Ticket_Survival_Rate_NA", ticket_rate_na)
+
+# Average survival rate
+df_all = DF.mutate(df_all,
+  Survival_Rate: (col("Family_Survival_Rate") + col("Ticket_Survival_Rate")) / 2,
+  Survival_Rate_NA: (col("Family_Survival_Rate_NA") + col("Ticket_Survival_Rate_NA")) / 2
+)
+
+IO.puts("Survival rate features added")
+IO.puts("Rate missing after: #{S.nil_count(df_all["Survival_Rate"])}")
+IO.puts("Rate_NA missing after: #{S.nil_count(df_all["Survival_Rate_NA"])}")
+
+# df_all
+# |> DF.describe()
+# |> DF.select(~w(describe Survival_Rate Survival_Rate_NA))
+# |> DF.print(limit: :infinity)
+```
+
+```elixir
+# 6. ラベルエンコーディング
+# ラベルをいったん数値に変換
+defmodule LabelEncoder do
+  def fit_transform(series) do
+    unique_values =
+      series
+      |> S.distinct()
+      |> S.to_list()
+      |> Enum.with_index()
+      |> Map.new()
+
+    series
+    |> S.transform(fn val -> Map.get(unique_values, val, 0) end)
+  end
+end
+
+# Label encode categorical columns
+categorical_cols = ["Embarked", "Sex", "Deck", "Title", "Family_Size_Grouped"]
+
+df_all =
+  Enum.reduce(categorical_cols, df_all, fn col, df ->
+    encoded = LabelEncoder.fit_transform(df[col])
+    DF.put(df, "#{col}_Encoded", encoded)
+  end)
+
+IO.puts("Label encoding completed")
+
+categorical_cols
+|> Enum.each(fn col ->
+  key = col <> "_Encoded"
+  IO.puts("#{key} missing after: #{S.nil_count(df_all[key])}")
+end)
+```
+
+```elixir
+# 7. ワンホットエンコーディング
+defmodule OneHotEncoder do
+  def encode(df, column) do
+    unique_vals =
+      df[column]
+      |> S.distinct()
+      |> S.to_list()
+      |> Enum.sort()
+
+    Enum.reduce(unique_vals, df, fn val, acc_df ->
+      new_col = "#{column}_#{val}"
+      indicator = S.transform(df[column], fn v -> if v == val, do: 1, else: 0 end)
+      DF.put(acc_df, new_col, indicator)
+    end)
+  end
+end
+
+# One-hot encode for model
+onehot_cols = ["Pclass", "Sex_Encoded", "Deck_Encoded", "Embarked_Encoded",
+               "Title_Encoded", "Family_Size_Grouped_Encoded"]
+
+df_all =
+  Enum.reduce(onehot_cols, df_all, fn col, df ->
+    OneHotEncoder.encode(df, col)
+  end)
+
+IO.puts("One-hot encoding completed")
+```
+
+## データ分離など
+
+```elixir
+# 特徴量エンジニアリングが終わったので、モデル生成前にデータ分離など
+
+all_names = DF.names(df_all)
+
+feature_cols = [
+  "Age",
+  "Fare",
+  "Is_Married",
+  "Ticket_Frequency",
+  "Survival_Rate",
+  "Survival_Rate_NA"
+] ++
+  (all_names |> Enum.filter(&String.starts_with?(&1, "Pclass_"))) ++
+  (all_names |> Enum.filter(&String.starts_with?(&1, "Sex_Encoded_"))) ++
+  (all_names |> Enum.filter(&String.starts_with?(&1, "Deck_Encoded_"))) ++
+  (all_names |> Enum.filter(&String.starts_with?(&1, "Embarked_Encoded_"))) ++
+  (all_names |> Enum.filter(&String.starts_with?(&1, "Title_Encoded_"))) ++
+  (all_names |> Enum.filter(&String.starts_with?(&1, "Family_Size_Grouped_Encoded_")))
+
+IO.puts("Selected #{length(feature_cols)} features:")
+
+df_all
+|> DF.describe()
+|> DF.select(~w(describe) ++ feature_cols)
+|> Kino.DataTable.new()
+```
+
+```elixir
+# Split back to train and test
+df_train_final = DF.filter(df_all, is_train == 1)
+df_test_final = DF.filter(df_all, is_train == 0)
+
+# Prepare feature matrices
+x_train =
+  df_train_final
+  |> DF.select(feature_cols)
+  |> DF.to_rows()
+  |> Enum.map(fn row -> Enum.map(feature_cols, &row[&1]) end)
+  |> Nx.tensor(type: :f32)
+
+y_train =
+  df_train_final["Survived"]
+  |> S.to_list()
+  |> Nx.tensor(type: :u8)
+
+x_test =
+  df_test_final
+  |> DF.select(feature_cols)
+  |> DF.to_rows()
+  |> Enum.map(fn row -> Enum.map(feature_cols, &row[&1]) end)
+  |> Nx.tensor(type: :f32)
+
+IO.puts("X_train shape: #{inspect(Nx.shape(x_train))}")
+IO.puts("y_train shape: #{inspect(Nx.shape(y_train))}")
+IO.puts("X_test shape: #{inspect(Nx.shape(x_test))}")
+```
+
+## XGBoost 適用（おまけ）
+
+```elixir
+# 前処理がメインですが、どうせなので学習して結果を出します。
+
+# 参照記事元はランダムフォレストですが、
+# Elixirで試すのにXGBoostが公開であったので利用しています。
+# （XGBoostの場合、前処理のいくつかは不要です）
+
+# see https://github.com/acalejos/exgboost
+model = EXGBoost.train(x_train, y_train)
+
+IO.puts("Model trained successfully!")
+```
+
+```elixir
+# train 正答率
+# 特に学習時に検証データを設定をしていないため高くでるものと思われる
+y_train_prob = EXGBoost.predict(model, x_train)
+y_train_pred = Nx.greater_equal(y_train_prob, 0.5)
+
+correct =
+  Nx.equal(y_train_pred, y_train)
+  |> Nx.sum()
+  |> Nx.to_number()
+
+accuracy = correct / Nx.size(y_train)
+IO.puts("Training accuracy: #{Float.round(accuracy * 100, 2)}%")
+```
+
+```elixir
+# test に対する適用
+y_test_prob = EXGBoost.predict(model, x_test)
+y_test = Nx.greater_equal(y_test_prob, 0.5) |> Nx.to_list()
+```
+
+```elixir
+# test結果を出力して、Kaggleにあげて確認用
+df_result =
+  df_test
+  |> DF.put("Survived", y_test)
+  |> DF.select(~w(PassengerId Survived))
+
+csv = DF.dump_csv!(df_result)
+
+Kino.Download.new(fn -> csv end, filename: "result.csv")
+```
+
+結果は... 0.76794 でした。過学習しているだろうと予想できます。
