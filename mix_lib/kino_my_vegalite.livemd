@@ -105,7 +105,7 @@ defmodule Kino.MyVegaLite do
     x_values = Series.to_list(df[order_column])
 
     Enum.zip(y_values, x_values)
-    |> Enum.map(& %{"value" => elem(&1, 0), "x" => elem(&1, 1)})
+    |> Enum.map(&%{"value" => elem(&1, 0), "x" => elem(&1, 1)})
     |> to_line(options)
   end
 
@@ -114,7 +114,7 @@ defmodule Kino.MyVegaLite do
 
     y_values
     |> Enum.with_index(1)
-    |> Enum.map(& %{"value" => elem(&1, 0), "x" => elem(&1, 1)})
+    |> Enum.map(&%{"value" => elem(&1, 0), "x" => elem(&1, 1)})
     |> to_line(options)
   end
 
@@ -170,6 +170,7 @@ defmodule Kino.MyVegaLite do
     data =
       if color_column do
         color_values = Series.to_list(df[color_column])
+
         Enum.zip([x_values, y_values, color_values])
         |> Enum.map(fn {x, y, c} -> %{"x" => x, "y" => y, "color" => c} end)
       else
@@ -240,21 +241,24 @@ defmodule Kino.MyVegaLite do
     * `:x_title` - x軸のタイトル
     * `:y_title` - y軸のタイトル
   """
-  def to_bar(df, category_column, options) when is_struct(df) do
-    category_values = Series.to_list(df[category_column])
-    data = Enum.map(category_values, fn cat -> %{"category" => cat} end)
-    do_bar(data, false, options)
-  end
-
   def to_bar(df, category_column, value_column, options) when is_struct(df) do
     category_values = Series.to_list(df[category_column])
     value_values = Series.to_list(df[value_column])
-    data = Enum.zip(category_values, value_values)
-           |> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
-    do_bar(data, true, options)
+
+    data =
+      Enum.zip(category_values, value_values)
+      |> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
+
+    to_bar(data, true, options)
   end
 
-  defp do_bar(values, has_value, options) do
+  def to_bar(df, category_column, options) when is_struct(df) do
+    category_values = Series.to_list(df[category_column])
+    data = Enum.map(category_values, fn cat -> %{"category" => cat} end)
+    to_bar(data, false, options)
+  end
+
+  def to_bar(values, has_value, options) do
     width = Keyword.get(options, :width, 600)
     height = Keyword.get(options, :height, 400)
     aggregate = Keyword.get(options, :aggregate, :count)
@@ -264,9 +268,10 @@ defmodule Kino.MyVegaLite do
 
     value_field = if has_value, do: "value", else: "category"
 
-    chart = VegaLite.new(width: width, height: height)
-    |> VegaLite.data_from_values(values)
-    |> VegaLite.mark(:bar, tooltip: true)
+    chart =
+      VegaLite.new(width: width, height: height)
+      |> VegaLite.data_from_values(values)
+      |> VegaLite.mark(:bar, tooltip: true)
 
     if horizontal do
       chart
@@ -285,6 +290,39 @@ defmodule Kino.MyVegaLite do
         title: y_title
       )
     end
+  end
+
+  @doc """
+  グループ化棒グラフ
+
+  複数のグループを並べて比較する棒グラフを生成します。
+
+  ## Examples
+
+      data = [
+        %{"category" => "A", "group" => "X", "value" => 0.3},
+        %{"category" => "A", "group" => "Y", "value" => 0.5},
+        %{"category" => "B", "group" => "X", "value" => 0.4},
+        %{"category" => "B", "group" => "Y", "value" => 0.2}
+      ]
+      Kino.MyVegaLite.to_grouped_bar(data, width: 400, height: 300)
+
+  ## Options
+
+    * `:width` - グラフの幅（デフォルト: 600）
+    * `:height` - グラフの高さ（デフォルト: 400）
+  """
+  def to_grouped_bar(values, options \\ []) when is_list(values) do
+    width = Keyword.get(options, :width, 600)
+    height = Keyword.get(options, :height, 400)
+
+    VegaLite.new(width: width, height: height)
+    |> VegaLite.data_from_values(values)
+    |> VegaLite.mark(:bar, tooltip: true)
+    |> VegaLite.encode_field(:x, "category", type: :nominal)
+    |> VegaLite.encode_field(:y, "value", type: :quantitative)
+    |> VegaLite.encode_field(:color, "group", type: :nominal)
+    |> VegaLite.encode_field(:x_offset, "group", type: :nominal)
   end
 
   @doc """
@@ -320,8 +358,11 @@ defmodule Kino.MyVegaLite do
   def to_boxplot(df, value_column, category_column, options) when is_struct(df) do
     value_values = Series.to_list(df[value_column])
     category_values = Series.to_list(df[category_column])
-    data = Enum.zip(category_values, value_values)
-           |> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
+
+    data =
+      Enum.zip(category_values, value_values)
+      |> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
+
     do_boxplot(data, options)
   end
 
@@ -483,6 +524,7 @@ Kino.MyVegaLite.to_scatter(df, "sepal_width", "sepal_length",
 
 ```elixir
 Kino.MyVegaLite.to_bar(df, "species",
+  aggregate: :count,
   width: 200,
   height: 200,
   x_title: "species",

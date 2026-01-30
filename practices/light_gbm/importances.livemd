@@ -3,16 +3,19 @@
 ```elixir
 Mix.install([
   {:explorer, "~> 0.11", override: true},
+  {:scholar, "~> 0.4", override: true},
   {:kino, "~> 0.18"},
   {:kino_vega_lite, "~> 0.1"},
   {:kino_data_input, path: "/data/mix_lib/kino_data_input"},
   {:kino_my_vegalite, path: "/data/mix_lib/kino_my_vegalite"},
   {:titanic, path: "/data/mix_lib/kaggle/titanic"},
-  {:lgbm_ex, "0.0.2", github: "/tato-gh/lgbm_ex"}
+  {:lgbm_ex, "0.0.2", github: "/tato-gh/lgbm_ex", override: true},
+  {:lgbm_exx, "0.0.1", github: "/tato-gh/lgbm_exx"}
 ])
 
 Application.put_env(:lgbm_ex, :workdir, Path.join(System.tmp_dir!(), "lgbm_ex"))
 alias Explorer.DataFrame, as: DF
+alias Explorer.Series
 ```
 
 ## データ準備
@@ -52,4 +55,84 @@ model = LgbmEx.fit("titanic", df_train, "Survived",
 model.learning_steps
 |> Enum.map(& %{"value" => elem(&1, 0), "x" => elem(&1, 1)})
 |> Kino.MyVegaLite.to_line(width: 400, height: 200)
+```
+
+## 重要度 Feature Gain
+
+```elixir
+feature_names = model.parameters |> Keyword.get(:x_names)
+gains = model.feature_importance_gain |> Series.from_list()
+gains_normalized = Series.divide(gains, Series.sum(gains)) |> Series.to_list()
+
+Enum.zip(feature_names, gains_normalized)
+|> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
+|> Kino.MyVegaLite.to_bar(true, aggregate: :sum, width: 600, height: 200)
+```
+
+## 重要度 Feature Split
+
+```elixir
+feature_names = model.parameters |> Keyword.get(:x_names)
+gains = model.feature_importance_split |> Series.from_list()
+gains_normalized = Series.divide(gains, Series.sum(gains)) |> Series.to_list()
+
+Enum.zip(feature_names, gains_normalized)
+|> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
+|> Kino.MyVegaLite.to_bar(true, aggregate: :sum, width: 600, height: 200)
+```
+
+## 重要度 Permutation Importance
+
+```elixir
+feature_names = model.parameters |> Keyword.get(:x_names)
+y_vec = df_train["Survived"]
+x_vecs =
+  feature_names
+  |> Enum.reduce([], fn name, acc ->
+    acc ++ [Series.to_list(df_train[name])]
+  end)
+  |> Enum.zip_with(& &1)
+
+{base_score, results} =
+  LgbmExx.permutation_importance(model, x_vecs, y_vec, fn probs, results ->
+    probs = Enum.map(probs, & hd/1)
+    Scholar.Metrics.Classification.brier_score_loss(Nx.tensor(results), Nx.tensor(probs))
+    |> Nx.to_number()
+  end, n_repeats: 3)
+```
+
+```elixir
+gains = results |> Enum.map(& -1 * elem(&1, 1)) |> Series.from_list()
+perm_normalized = Series.divide(gains, Series.sum(gains)) |> Series.to_list()
+
+Enum.zip(feature_names, perm_normalized)
+|> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
+|> Kino.MyVegaLite.to_bar(true, aggregate: :sum, width: 600, height: 200)
+```
+
+## 重要度比較
+
+```elixir
+# Gain
+gain_gains = model.feature_importance_gain |> Series.from_list()
+gain_normalized = Series.divide(gain_gains, Series.sum(gain_gains)) |> Series.to_list()
+
+# Split
+split_gains = model.feature_importance_split |> Series.from_list()
+split_normalized = Series.divide(split_gains, Series.sum(split_gains)) |> Series.to_list()
+
+# Permutation (already calculated as perm_normalized)
+
+data =
+  feature_names
+  |> Enum.with_index()
+  |> Enum.flat_map(fn {name, i} ->
+    [
+      %{"category" => name, "group" => "Gain", "value" => Enum.at(gain_normalized, i)},
+      %{"category" => name, "group" => "Split", "value" => Enum.at(split_normalized, i)},
+      %{"category" => name, "group" => "Permutation", "value" => Enum.at(perm_normalized, i)}
+    ]
+  end)
+
+Kino.MyVegaLite.to_grouped_bar(data, width: 600, height: 300)
 ```

@@ -113,12 +113,6 @@ defmodule Kino.MyVegaLite do
   end
 
   @doc "棒グラフ\n\nDataFrame のカテゴリ列から棒グラフを生成します。\nカウント集計または指定した数値列の値を表示できます。\n\n## Examples\n\n    # カテゴリのカウント\n    Kino.MyVegaLite.to_bar(df, \"species\", width: 400, height: 300)\n\n    # カテゴリ別の平均値\n    Kino.MyVegaLite.to_bar(df, \"species\", \"sepal_length\",\n      aggregate: :mean,\n      width: 400,\n      height: 300\n    )\n\n    # 横棒グラフ\n    Kino.MyVegaLite.to_bar(df, \"species\",\n      horizontal: true,\n      width: 400,\n      height: 300\n    )\n\n## Options\n\n  * `:width` - グラフの幅（デフォルト: 600）\n  * `:height` - グラフの高さ（デフォルト: 400）\n  * `:aggregate` - 集計方法（:count, :mean, :sum など、デフォルト: :count）\n  * `:horizontal` - 横棒グラフにする場合は true（デフォルト: false）\n  * `:x_title` - x軸のタイトル\n  * `:y_title` - y軸のタイトル\n"
-  def to_bar(df, category_column, options) when is_struct(df) do
-    category_values = Series.to_list(df[category_column])
-    data = Enum.map(category_values, fn cat -> %{"category" => cat} end)
-    do_bar(data, false, options)
-  end
-
   def to_bar(df, category_column, value_column, options) when is_struct(df) do
     category_values = Series.to_list(df[category_column])
     value_values = Series.to_list(df[value_column])
@@ -127,10 +121,16 @@ defmodule Kino.MyVegaLite do
       Enum.zip(category_values, value_values)
       |> Enum.map(fn {cat, val} -> %{"category" => cat, "value" => val} end)
 
-    do_bar(data, true, options)
+    to_bar(data, true, options)
   end
 
-  defp do_bar(values, has_value, options) do
+  def to_bar(df, category_column, options) when is_struct(df) do
+    category_values = Series.to_list(df[category_column])
+    data = Enum.map(category_values, fn cat -> %{"category" => cat} end)
+    to_bar(data, false, options)
+  end
+
+  def to_bar(values, has_value, options) do
     width = Keyword.get(options, :width, 600)
     height = Keyword.get(options, :height, 400)
     aggregate = Keyword.get(options, :aggregate, :count)
@@ -167,6 +167,20 @@ defmodule Kino.MyVegaLite do
         title: y_title
       )
     end
+  end
+
+  @doc "グループ化棒グラフ\n\n複数のグループを並べて比較する棒グラフを生成します。\n\n## Examples\n\n    data = [\n      %{\"category\" => \"A\", \"group\" => \"X\", \"value\" => 0.3},\n      %{\"category\" => \"A\", \"group\" => \"Y\", \"value\" => 0.5},\n      %{\"category\" => \"B\", \"group\" => \"X\", \"value\" => 0.4},\n      %{\"category\" => \"B\", \"group\" => \"Y\", \"value\" => 0.2}\n    ]\n    Kino.MyVegaLite.to_grouped_bar(data, width: 400, height: 300)\n\n## Options\n\n  * `:width` - グラフの幅（デフォルト: 600）\n  * `:height` - グラフの高さ（デフォルト: 400）\n"
+  def to_grouped_bar(values, options \\ []) when is_list(values) do
+    width = Keyword.get(options, :width, 600)
+    height = Keyword.get(options, :height, 400)
+
+    VegaLite.new(width: width, height: height)
+    |> VegaLite.data_from_values(values)
+    |> VegaLite.mark(:bar, tooltip: true)
+    |> VegaLite.encode_field(:x, "category", type: :nominal)
+    |> VegaLite.encode_field(:y, "value", type: :quantitative)
+    |> VegaLite.encode_field(:color, "group", type: :nominal)
+    |> VegaLite.encode_field(:x_offset, "group", type: :nominal)
   end
 
   @doc "箱ひげ図\n\nDataFrame の数値列から箱ひげ図を生成します。\nカテゴリ別にグループ化して比較することもできます。\n\n## Examples\n\n    # 単一列の箱ひげ図\n    Kino.MyVegaLite.to_boxplot(df, \"sepal_length\", width: 400, height: 300)\n\n    # カテゴリ別の箱ひげ図\n    Kino.MyVegaLite.to_boxplot(df, \"sepal_length\", \"species\",\n      width: 400,\n      height: 300\n    )\n\n## Options\n\n  * `:width` - グラフの幅（デフォルト: 600）\n  * `:height` - グラフの高さ（デフォルト: 400）\n  * `:x_title` - x軸のタイトル\n  * `:y_title` - y軸のタイトル\n"
