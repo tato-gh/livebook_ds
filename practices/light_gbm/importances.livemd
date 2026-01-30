@@ -1,0 +1,55 @@
+# LightGBM Importances
+
+```elixir
+Mix.install([
+  {:explorer, "~> 0.11", override: true},
+  {:kino, "~> 0.18"},
+  {:kino_vega_lite, "~> 0.1"},
+  {:kino_data_input, path: "/data/mix_lib/kino_data_input"},
+  {:kino_my_vegalite, path: "/data/mix_lib/kino_my_vegalite"},
+  {:titanic, path: "/data/mix_lib/kaggle/titanic"},
+  {:lgbm_ex, "0.0.2", github: "/tato-gh/lgbm_ex"}
+])
+
+Application.put_env(:lgbm_ex, :workdir, Path.join(System.tmp_dir!(), "lgbm_ex"))
+alias Explorer.DataFrame, as: DF
+```
+
+## データ準備
+
+```elixir
+{frame, refs} = Kino.DataInput.frame_data_inputs()
+frame
+```
+
+```elixir
+{df_train_raw, df_test_raw} = Kino.DataInput.to_dataframe(refs)
+:loaded
+```
+
+```elixir
+{df_train, df_test, feature_names} = Kaggle.Titanic.preprocess(df_train_raw, df_test_raw)
+feature_names
+```
+
+## モデル生成と学習曲線
+
+```elixir
+df_train |> DF.describe() |> DF.print()
+```
+
+```elixir
+model = LgbmEx.fit("titanic", df_train, "Survived",
+  objective: "binary",
+  metric: "binary_logloss",
+  # 200でほぼ収束するため指定
+  num_iterations: 200
+)
+:learned
+```
+
+```elixir
+model.learning_steps
+|> Enum.map(& %{"value" => elem(&1, 0), "x" => elem(&1, 1)})
+|> Kino.MyVegaLite.to_line(width: 400, height: 200)
+```

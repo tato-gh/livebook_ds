@@ -1,9 +1,9 @@
-# KinoDataInputs
+# KinoDataInput
 
 ```elixir
 Mix.install([
   {:kino, "~> 0.14"},
-  {:explorer, "~> 0.11.1"},
+  {:explorer, "~> 0.8"},
   {:kino_export_to_mix, path: "/data/mix_lib/kino_export_to_mix"}
 ])
 ```
